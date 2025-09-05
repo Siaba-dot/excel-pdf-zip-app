@@ -25,6 +25,16 @@ Rename files to match the YYYY_MM pattern
 
 Download all updated Excel files as a new ZIP
 
+📅 Why date replacement matters
+
+Updating C5 cell to the last day of the current month ensures the document always reflects the correct reporting date
+
+This change also recalculates the number of days in that month (28, 30, or 31)
+
+Dependent formulas are updated automatically → resulting in correct totals and sums
+
+A9 cell is updated with the correct month name in Lithuanian, keeping the documents consistent with the actual reporting period
+
 🚀 Usage
 
 Open the deployed app (Streamlit Cloud link).
@@ -35,7 +45,7 @@ The app will start processing:
 
 Updating C5 and A9 cells
 
-Renaming files 
+Renaming files if necessary
 
 Showing live progress in the log window
 

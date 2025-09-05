@@ -33,7 +33,7 @@ The app will start processing:
 
 Updating C5 and A9 cells
 
-Renaming files if necessary
+Renaming files 
 
 Showing live progress in the log window
 

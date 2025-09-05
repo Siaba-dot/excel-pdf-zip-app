@@ -1,18 +1,6 @@
 # excel-zip-app
 📄 Excel Processing Streamlit App
 
-Streamlit app for processing Excel files:
-
-Upload a folder as ZIP (with subfolders)
-
-Automatically update C5 cell with the last date of the current month
-
-Replace month names in A9 cell with the current month (Lithuanian)
-
-Rename files to match the YYYY_MM pattern
-
-Download all updated Excel files as a new ZIP
-
 ✨ Features
 
 Upload a folder as ZIP (with subfolders)

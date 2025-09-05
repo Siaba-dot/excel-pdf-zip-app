@@ -6,24 +6,29 @@ import zipfile
 import tempfile
 import calendar
 from datetime import datetime
-from pathlib import Path
 
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
-# PDF (be MS Excel) – artimas Excel išdėstymui
+# PDF: pagrindinis generatorius
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 
+# PDF: atsarginis (fallback) generatorius
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
+import pandas as pd
+
 
 # ------------------------------
-# 📆 Einamo mėn. pabaiga + pavadinimas (LT)
+# Bendri pagalbininkai
 # ------------------------------
 def get_current_month_end_and_name():
+    """Grąžina (YYYY-MM-DD, mėnesio_pavadinimas_LT_genityvas)."""
     today = datetime.today()
     month_end_day = calendar.monthrange(today.year, today.month)[1]
     current_month_end = today.replace(day=month_end_day)
@@ -31,22 +36,39 @@ def get_current_month_end_and_name():
         "sausio", "vasario", "kovo", "balandžio", "gegužės", "birželio",
         "liepos", "rugpjūčio", "rugsėjo", "spalio", "lapkričio", "gruodžio"
     ]
-    current_month_name = month_names[today.month - 1]
-    return current_month_end.strftime("%Y-%m-%d"), current_month_name
+    return current_month_end.strftime("%Y-%m-%d"), month_names[today.month - 1]
+
+
+def unzip_to_temp(uploaded_zip_file):
+    """Išarchyvuoja į laikino katalogo šaknį ir grąžina (dir_path, tmp_handle)."""
+    tmp_dir = tempfile.TemporaryDirectory()
+    zip_bytes = uploaded_zip_file.read()
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        zf.extractall(tmp_dir.name)
+    return tmp_dir.name, tmp_dir
+
+
+def zip_tree_to_bytes(root_dir: str) -> bytes:
+    """Supa©kuoja visą medį ir grąžina zip baitus atsisiuntimui."""
+    mem_zip = io.BytesIO()
+    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for folder_name, _, filenames in os.walk(root_dir):
+            for fn in filenames:
+                abs_path = os.path.join(folder_name, fn)
+                arcname = os.path.relpath(abs_path, root_dir)
+                zf.write(abs_path, arcname=arcname)
+    mem_zip.seek(0)
+    return mem_zip.read()
 
 
 # ------------------------------
-# 🖨️ Excel → PDF (artimesnis originalui) su ReportLab
+# PDF generatoriai
 # ------------------------------
 def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
     """
-    Generuoja PDF iš pirmo Excel lapo, išlaikant daugumą išdėstymo aspektų:
-    - stulpelių pločiai / eilučių aukščiai,
-    - rėmeliai (basic), užpildai (basic),
-    - tekstas su bold/italic ir lygiuotėmis,
-    - merged cells palaikymas.
-
-    Tai nėra 1:1 Excel renderis, bet gerokai artimesnis nei paprasta lentelė.
+    Pagrindinis (kokybiškesnis) Excel -> PDF be MS Excel:
+    - Skaito pirmą lapą.
+    - Išlaiko stulpelių pločius, eilučių aukščius, paprastus rėmelius, fill, lygiavimą, bold/italic, merged cells.
     """
     try:
         wb = load_workbook(xlsx_path, data_only=True)
@@ -69,11 +91,11 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
             cw = ws.column_dimensions[letter].width
             if cw is None:
                 cw = 8.43  # Excel numatytasis
-            # konversija: char→px (~7 px/char), px→pt (72/96)
+            # char -> px (~7 px/char), px -> pt (72/96)
             pts = cw * 7 * (72.0 / 96.0)
             col_widths.append(pts)
 
-        # Eilučių aukštis (OpenPyXL nurodo pt; jei None – ~15pt)
+        # Eilučių aukštis (pt; jei None – ~15pt)
         row_heights = []
         for r in range(min_row_idx, max_row_idx + 1):
             rh = ws.row_dimensions[r].height
@@ -84,7 +106,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
         total_w_pts = sum(col_widths)
         total_h_pts = sum(row_heights)
 
-        # Skalė, kad tilptų į A4 (su paraštėmis)
+        # Skalė į A4 (neišeinant už paraščių)
         scale_x = content_w / total_w_pts if total_w_pts > 0 else 1.0
         scale_y = content_h / total_h_pts if total_h_pts > 0 else 1.0
         scale = min(scale_x, scale_y, 1.0)
@@ -92,7 +114,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
         origin_x = margin + (content_w - total_w_pts * scale) / 2.0
         origin_y = margin + (content_h - total_h_pts * scale) / 2.0
 
-        # Kaupiamos sumos koordinačių skaičiavimui
+        # Kaupiamos sumos
         col_acc = [0.0]
         for w in col_widths:
             col_acc.append(col_acc[-1] + w * scale)
@@ -100,7 +122,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
         for h in row_heights:
             row_acc.append(row_acc[-1] + h * scale)
 
-        # Merged cells žemėlapiai
+        # Merged cells
         merged_rects = {}  # (row, col) -> (rowspan, colspan)
         for m in ws.merged_cells.ranges:
             merged_rects[(m.min_row, m.min_col)] = (m.max_row - m.min_row + 1,
@@ -112,12 +134,11 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
                     if not (rr == sr and cc == sc):
                         merged_members.add((rr, cc))
 
-        # Koord. pagal langelio „diapazono“ indeksus (1-based)
         def cell_xywh(r, c, rowspan=1, colspan=1):
             r0 = r - min_row_idx
             c0 = c - min_col_idx
             x = origin_x + col_acc[c0]
-            # ReportLab koordinatės – apačioje, todėl skaičiuojame nuo viršaus
+            # ReportLab koordinatės – apačioje; verčiam nuo viršaus
             y = origin_y + (sum(row_heights) * scale - row_acc[r0 + rowspan] + row_acc[r0])
             w = col_acc[c0 + colspan] - col_acc[c0]
             h = row_acc[r0 + rowspan] - row_acc[r0]
@@ -126,7 +147,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
         os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
         c = canvas.Canvas(pdf_path, pagesize=A4)
 
-        # 1) Pirmiausia – užpildai + rėmeliai
+        # 1) Užpildai + rėmeliai
         for r in range(min_row_idx, max_row_idx + 1):
             for ci in range(min_col_idx, max_col_idx + 1):
                 if (r, ci) in merged_members:
@@ -138,7 +159,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
 
                 cell = ws.cell(row=r, column=ci)
 
-                # Užpildymas (paprasta RGB interpretacija)
+                # Užpildymas
                 fill = cell.fill
                 try:
                     if fill and fill.start_color and getattr(fill.start_color, "rgb", None):
@@ -152,7 +173,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
                 except Exception:
                     pass
 
-                # Rėmeliai (jei bent kažkoks kraštas pažymėtas)
+                # Rėmeliai (paprastas atvejis)
                 border = cell.border
                 draw_border = any([
                     border.left and border.left.style,
@@ -165,7 +186,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
                     c.setLineWidth(0.6)
                     c.rect(x, y, w, h, fill=0, stroke=1)
 
-        # 2) Tada – tekstas
+        # 2) Tekstas
         for r in range(min_row_idx, max_row_idx + 1):
             for ci in range(min_col_idx, max_col_idx + 1):
                 if (r, ci) in merged_members:
@@ -176,8 +197,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
                 x, y, w, h = cell_xywh(r, ci, rowspan, colspan)
                 cell = ws.cell(row=r, column=ci)
 
-                # Tušti langeliai – ne „NaN“
-                val = "" if cell.value is None else str(cell.value)
+                val = "" if cell.value is None else str(cell.value)  # jokių NaN
 
                 # Šriftas
                 font = cell.font
@@ -195,7 +215,7 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
                     except Exception:
                         pass
 
-                # Lygiuotės
+                # Lygiuotė
                 ha = "left"
                 va = "middle"
                 if cell.alignment:
@@ -208,34 +228,25 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
                     elif cell.alignment.vertical in ("bottom",):
                         va = "bottom"
 
-                # Paraštėlės teksto rėžyje
+                # Teksto pozicija
                 pad_x = 2
                 pad_y = 1
+                st_x = x + pad_x if ha == "left" else (x + w / 2.0 if ha == "center" else x + w - pad_x)
+                if va == "top":
+                    st_y = y + h - pad_y - font_size
+                elif va == "bottom":
+                    st_y = y + pad_y
+                else:
+                    st_y = y + (h - font_size) / 2.0
 
-                # Bazinės koordinatės
                 c.setFont(font_name, font_size)
                 c.setFillColor(colors.black)
-
-                if ha == "left":
-                    text_x = x + pad_x
-                elif ha == "center":
-                    text_x = x + w / 2.0
-                else:
-                    text_x = x + w - pad_x
-
-                if va == "top":
-                    text_y = y + h - pad_y - font_size
-                elif va == "bottom":
-                    text_y = y + pad_y
-                else:
-                    text_y = y + (h - font_size) / 2.0
-
                 if ha == "center":
-                    c.drawCentredString(text_x, text_y, val)
+                    c.drawCentredString(st_x, st_y, val)
                 elif ha == "right":
-                    c.drawRightString(text_x, text_y, val)
+                    c.drawRightString(st_x, st_y, val)
                 else:
-                    c.drawString(text_x, text_y, val)
+                    c.drawString(st_x, st_y, val)
 
         c.showPage()
         c.save()
@@ -246,8 +257,32 @@ def excel_to_pdf_reportlab(xlsx_path: str, pdf_path: str):
         return False, str(e)
 
 
+def excel_to_simple_pdf(xlsx_path: str, pdf_path: str):
+    """
+    Atsarginis (fallback) variantas:
+    - Paimamas 1-asis lapas į pandas DataFrame.
+    - Sugeneruojama paprasta lentelė į PDF (be sudėtingo formatavimo).
+    """
+    try:
+        df = pd.read_excel(xlsx_path, sheet_name=0, header=None)
+        df = df.fillna("")  # jokių NaN
+        os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
+        with PdfPages(pdf_path) as pdf:
+            fig, ax = plt.subplots(figsize=(11.69, 8.27))  # ~A4 landscape
+            ax.axis('off')
+            tbl = ax.table(cellText=df.values.astype(str), loc='center')
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(8)
+            tbl.scale(1, 1.2)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # ------------------------------
-# 🛠️ Excel apdorojimas visame medyje
+# Excel failų medis: redagavimas + PDF + pervadinimas
 # ------------------------------
 def process_excels_in_tree(base_dir: str, log_lines: list):
     current_month_end, current_month_name = get_current_month_end_and_name()
@@ -262,18 +297,19 @@ def process_excels_in_tree(base_dir: str, log_lines: list):
         rel_root = os.path.relpath(root, base_dir)
         log_lines.append(f"📁 Aplankas: {rel_root if rel_root != '.' else '/'}")
         for filename in files:
-            if not filename.lower().endswith(".xlsx"):
+            low = filename.lower()
+            if not low.endswith((".xlsx", ".xlsm")):
                 continue
 
             file_path = os.path.join(root, filename)
             log_lines.append(f"  🔄 Failas: {os.path.join(rel_root, filename)}")
 
             try:
-                # 1) Excel redagavimas (C5 data, A9 mėnuo)
+                # 1) Excel redagavimas (C5, A9)
                 wb = load_workbook(file_path)
                 sheet = wb.active
 
-                # C5 data
+                # C5 – mėn. pabaigos data
                 try:
                     if sheet["C5"].value is not None:
                         dt = datetime.strptime(current_month_end, "%Y-%m-%d").date()
@@ -282,9 +318,9 @@ def process_excels_in_tree(base_dir: str, log_lines: list):
                 except Exception as e:
                     log_lines.append(f"    ⚠️ Nepavyko atnaujinti C5: {e}")
 
-                # A9 mėnesio žodis
+                # A9 – mėnesio pavadinimo keitimas
                 try:
-                    if sheet["A9"].value:
+                    if sheet["A9"].value is not None:
                         cell_value = str(sheet["A9"].value).strip()
                         replaced = False
                         for month in months:
@@ -302,14 +338,14 @@ def process_excels_in_tree(base_dir: str, log_lines: list):
                 wb.save(file_path)
                 wb.close()
 
-                # 2) Pervadinam failą, jei vardas turi YYYY_MM
+                # 2) Pervadinimas pagal YYYY_MM
                 try:
                     year = current_month_end[:4]
                     month_num = current_month_end[5:7]
                     new_filename = re.sub(r"(\d{4})_(\d{2})", f"{year}_{month_num}", filename)
                     if new_filename != filename:
                         new_path = os.path.join(root, new_filename)
-                        if os.path.exists(new_path):
+                        if os.path.exists(new_path):  # versijavimas, jei toks jau yra
                             base, ext = os.path.splitext(new_filename)
                             i = 1
                             while True:
@@ -324,7 +360,7 @@ def process_excels_in_tree(base_dir: str, log_lines: list):
                 except Exception as e:
                     log_lines.append(f"    ⚠️ Nepavyko pervadinti: {e}")
 
-                # 3) PDF generavimas (ReportLab)
+                # 3) PDF generavimas
                 try:
                     pdf_path = os.path.splitext(file_path)[0] + ".pdf"
                     if os.path.exists(pdf_path):
@@ -339,10 +375,15 @@ def process_excels_in_tree(base_dir: str, log_lines: list):
 
                     ok, err = excel_to_pdf_reportlab(file_path, pdf_path)
                     if ok:
-                        log_lines.append(f"    ✅ PDF -> {os.path.join(rel_root, os.path.basename(pdf_path))}")
+                        log_lines.append(f"    ✅ PDF (reportlab) -> {os.path.join(rel_root, os.path.basename(pdf_path))}")
                     else:
-                        all_ok = False
-                        log_lines.append(f"    ❌ PDF klaida: {err}")
+                        log_lines.append(f"    ⚠️ ReportLab nepavyko: {err} — bandau paprastą PDF...")
+                        ok2, err2 = excel_to_simple_pdf(file_path, pdf_path)
+                        if ok2:
+                            log_lines.append(f"    ✅ PDF (simple) -> {os.path.join(rel_root, os.path.basename(pdf_path))}")
+                        else:
+                            all_ok = False
+                            log_lines.append(f"    ❌ PDF nepavyko (abiem būdais): {err2}")
                 except Exception as e:
                     all_ok = False
                     log_lines.append(f"    ❌ PDF generavimo klaida: {e}")
@@ -355,29 +396,7 @@ def process_excels_in_tree(base_dir: str, log_lines: list):
 
 
 # ------------------------------
-# 📦 ZIP -> dir ir dir -> ZIP
-# ------------------------------
-def unzip_to_temp(uploaded_zip_file):
-    tmp_dir = tempfile.TemporaryDirectory()
-    zip_bytes = uploaded_zip_file.read()
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        zf.extractall(tmp_dir.name)
-    return tmp_dir.name, tmp_dir
-
-def zip_tree_to_bytes(root_dir: str) -> bytes:
-    mem_zip = io.BytesIO()
-    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for folder_name, _, filenames in os.walk(root_dir):
-            for fn in filenames:
-                abs_path = os.path.join(folder_name, fn)
-                arcname = os.path.relpath(abs_path, root_dir)
-                zf.write(abs_path, arcname=arcname)
-    mem_zip.seek(0)
-    return mem_zip.read()
-
-
-# ------------------------------
-# 🖥️ Streamlit UI
+# Streamlit UI
 # ------------------------------
 st.set_page_config(page_title="Aktų apdorojimas (Excel → PDF) | ZIP įkėlimas", page_icon="📄", layout="centered")
 
@@ -404,7 +423,6 @@ if uploaded is not None:
             status.update(label="Apdorojimas baigtas.", state="complete")
 
             st.text("\n".join(logs))
-
             st.download_button(
                 label="⬇️ Parsisiųsti rezultatą (.zip)",
                 data=out_bytes,

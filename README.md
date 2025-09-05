@@ -15,13 +15,15 @@ Download all updated Excel files as a new ZIP
 
 📅 Why date replacement matters
 
-Updating C5 cell to the last day of the current month ensures the document always reflects the correct reporting date
+C5 cell is automatically updated to the last day of the current month (e.g. 2025-09-30 in September, 2025-10-31 in October)
 
-This change also recalculates the number of days in that month (28, 30, or 31)
+This ensures that each month the data refreshes according to the current reporting period
 
-Dependent formulas are updated automatically → resulting in correct totals and sums
+Changing the date also triggers recalculation of the number of days in that month (28, 30, or 31)
 
-A9 cell is updated with the correct month name in Lithuanian, keeping the documents consistent with the actual reporting period
+Dependent formulas automatically update → producing correct totals and sums
+
+A9 cell is updated with the Lithuanian month name, so documents always match the actual month
 
 🚀 Usage
 
